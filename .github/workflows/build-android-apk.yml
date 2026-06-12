@@ -1,0 +1,90 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to build
+        required: false
+        default: dev
+      upload_name:
+        description: Artifact name prefix
+        required: false
+        default: Stapxs.QQ.Lite
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    name: Build signed Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: yarn
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Prepare public signing key
+        run: |
+          mkdir -p src/mobile/_signing
+          test -f src/mobile/_signing/OpenRealm.jks
+          cp src/mobile/_signing/OpenRealm.jks src/mobile/_signing/ssteam
+
+      - name: Build APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'OpenRealmAdmin' }}
+          KEYSTORE_ALIAS_PASSWORD: ${{ secrets.KEYSTORE_ALIAS_PASSWORD || 'OpenRealmAdmin' }}
+        run: |
+          yarn update:version
+          yarn build
+          npx capacitor sync android
+          cd src/mobile/android
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/src/mobile/_signing/OpenRealm.jks" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="OpenRealm" \
+            -Pandroid.injected.signing.key.password="$KEYSTORE_ALIAS_PASSWORD"
+
+      - name: Collect APK
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          mkdir -p upload
+          cp src/mobile/android/app/build/outputs/apk/release/app-release.apk "upload/${{ inputs.upload_name }}-${VERSION}-${SHORT_SHA}.apk"
+          sha256sum upload/*.apk > upload/SHA256SUMS.txt
+          ls -lh upload
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ inputs.ref }}
+          path: upload/*
+          if-no-files-found: error
